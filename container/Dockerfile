@@ -9,6 +9,8 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update -qq && \
     rm -rf /var/lib/apt/lists/* && \
     rm -rf /tmp/*
 
+RUN pip install tqdm future-fstrings
+
 COPY entry.sh /entry.sh
 RUN chmod +x /entry.sh
 ENTRYPOINT /entry.sh

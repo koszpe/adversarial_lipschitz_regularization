@@ -1,3 +1,4 @@
+# -*- coding: future_fstrings -*-
 import argparse
 import datetime
 from functools import partial
@@ -51,7 +52,7 @@ def unpickle(file):
 
 
 def get_cifar10_dataset(split=None):
-    train_dir = "/cache/data/cifar10/"
+    train_dir = "/cache/data/CIFAR10/train/"
 
     data = []
     for i in range(1, 7):
