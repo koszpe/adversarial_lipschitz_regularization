@@ -301,14 +301,19 @@ if __name__ == "__main__":
     parser.add_argument("--eps_min",       type=float, default=0.1)
     parser.add_argument("--eps_max",       type=float, default=10.0)
     parser.add_argument("--xi",            type=float, default=10.0)
+    parser.add_argument("--PI_init_type",  type=str,   default="cube", choices=["cube", "sphere", "vertex"])
+    parser.add_argument("--xi_eq_eps",     type=int,   default=0, choices=[0, 1])
     parser.add_argument("--ip",            type=int,   default=1)
     parser.add_argument("--K",             type=float, default=1)
     parser.add_argument("--p",             type=float, default=2)
     parser.add_argument("--n_critic",      type=int,   default=5)
     parser.add_argument("--reduce_fn",                 default="mean", choices=["mean", "sum", "max"])
     parser.add_argument("--reg",                       default="alp", choices=["gp", "lp", "alp"])
+    parser.add_argument( "--gpu_mask", type=int, default=0 )
     args = parser.parse_args()
     print(args)
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_mask)
 
     # set seeds for reproducibility
     np.random.seed(args.random_seed)
@@ -316,8 +321,13 @@ if __name__ == "__main__":
 
     sess = tf.InteractiveSession()
 
-    run_name = str(datetime.datetime.now()).replace(" ", "_").replace(":", "_").replace(".", "_")
+    run_name_parts = ["reg", "PI_init_type", "eps_min", "eps_max", "xi"]
+    run_name = ""
+    for key in run_name_parts:
+        run_name += f"{key}{getattr(args, key)}_"
+    run_name += str(datetime.datetime.now()).replace(" ", "_").replace(":", "_").replace(".", "_")
     log_dir = args.log_dir + run_name
+    print(f"log_dir: {log_dir}")
     os.makedirs(log_dir)
 
     reduce_fn = {
@@ -378,10 +388,20 @@ if __name__ == "__main__":
 
         validity = discriminator(samples, reuse=True)
 
-        d = tf.random_uniform(tf.shape(samples), 0, 1) - 0.5
+        if args.PI_init_type == "cube":
+            d = tf.random_uniform(tf.shape(samples), 0, 1) - 0.5
+        elif args.PI_init_type == "sphere":
+            d = tf.random_normal(tf.shape(samples), 0, 1)
+        elif args.PI_init_type == "vertex":
+            d = tf.cast(tf.random_uniform(tf.shape(samples), minval=0, maxval=2, dtype="int64"), dtype="float32") - 0.5
         d = normalize(d, ord=2)
+        if args.xi_eq_eps:
+            xi = eps
+        else:
+            xi = args.xi
         for _ in range(args.ip):
-            samples_hat = tf.clip_by_value(samples + args.xi * d, clip_value_min=-1, clip_value_max=1)
+            perturbation = xi * d
+            samples_hat = tf.clip_by_value(samples + perturbation, clip_value_min=-1, clip_value_max=1)
             validity_hat = discriminator(samples_hat, reuse=True)
             dist = tf.reduce_mean(tf.abs(validity - validity_hat))
             grad = tf.gradients(dist, [d], aggregation_method=2)[0]
