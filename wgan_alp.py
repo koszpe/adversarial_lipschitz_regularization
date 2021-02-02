@@ -286,7 +286,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--log_dir",                   default="/cache/logs/wgan_alp/")
-    parser.add_argument("--log_freq",      type=int,   default=1)
+    parser.add_argument("--log_freq",      type=int,   default=50)
     parser.add_argument("--iterations",    type=int,   default=100000)
     parser.add_argument("--batch_size",    type=int,   default=64)
     parser.add_argument("--save_freq",     type=int,   default=-1)
@@ -321,10 +321,10 @@ if __name__ == "__main__":
 
     sess = tf.InteractiveSession()
 
-    run_name_parts = ["reg", "PI_init_type", "eps_min", "eps_max", "xi"]
+    run_name_parts = ["reg", "PI_init_type", "xi_eq_eps", "eps_min", "eps_max", "xi"]
     run_name = ""
     for key in run_name_parts:
-        run_name += f"{key}{getattr(args, key)}_"
+        run_name += f"{key}:{getattr(args, key)}_"
     run_name += str(datetime.datetime.now()).replace(" ", "_").replace(":", "_").replace(".", "_")
     log_dir = args.log_dir + run_name
     print(f"log_dir: {log_dir}")
@@ -474,10 +474,6 @@ if __name__ == "__main__":
         scalars_summary('x_generated', x_generated)
         scalars_summary('x_true', x_true)
 
-        image_grid_summary('x_true', x_true)
-        image_grid_summary('x_generated', x_generated)
-        image_grid_summary('gradients', gradients)
-
         scalars_summary('gradient_norms', gradient_norms)
         scalars_summary('gradients', gradients)
 
@@ -509,37 +505,44 @@ if __name__ == "__main__":
                 tf.summary.scalar('inception_score', inception_score)
             ])
 
-            # FID VALIDATION
-            def resize_and_classify(x):
-                INCEPTION_FINAL_POOL = 'pool_3:0'
-                x = tf.image.resize_bilinear(x, [299, 299])
-                return tf.contrib.gan.eval.run_inception(x, output_tensor=INCEPTION_FINAL_POOL)
+            # # FID VALIDATION
+            # def resize_and_classify(x):
+            #     INCEPTION_FINAL_POOL = 'pool_3:0'
+            #     x = tf.image.resize_bilinear(x, [299, 299])
+            #     return tf.contrib.gan.eval.run_inception(x, output_tensor=INCEPTION_FINAL_POOL)
+            #
+            # fid_real = x_10k
+            # fid_z = tf.constant(np.random.randn(10000, 128), dtype='float32')
+            # fid_z_list = array_ops.split(fid_z, num_or_size_splits=10000 // 100)
+            # fid_z_batches = array_ops.stack(fid_z_list)
+            # fid_gen = functional_ops.map_fn(
+            #     fn=partial(generator, reuse=True),
+            #     elems=fid_z_batches,
+            #     parallel_iterations=1,
+            #     back_prop=False,
+            #     swap_memory=True,
+            #     name='RunGenerator'
+            # )
+            # fid_gen = array_ops.concat(array_ops.unstack(fid_gen), 0)
+            # fid = tf.contrib.gan.eval.frechet_classifier_distance(
+            #     fid_real,
+            #     fid_gen,
+            #     classifier_fn=resize_and_classify,
+            #     num_batches=10000 // 100
+            # )
+            #
+            # fid_summary = tf.summary.merge([
+            #     tf.summary.scalar('fid', fid)
+            # ])
 
-            fid_real = x_10k
-            fid_z = tf.constant(np.random.randn(10000, 128), dtype='float32')
-            fid_z_list = array_ops.split(fid_z, num_or_size_splits=10000 // 100)
-            fid_z_batches = array_ops.stack(fid_z_list)
-            fid_gen = functional_ops.map_fn(
-                fn=partial(generator, reuse=True),
-                elems=fid_z_batches,
-                parallel_iterations=1,
-                back_prop=False,
-                swap_memory=True,
-                name='RunGenerator'
-            )
-            fid_gen = array_ops.concat(array_ops.unstack(fid_gen), 0)
-            fid = tf.contrib.gan.eval.frechet_classifier_distance(
-                fid_real,
-                fid_gen,
-                classifier_fn=resize_and_classify,
-                num_batches=10000 // 100
-            )
-
-            fid_summary = tf.summary.merge([
-                tf.summary.scalar('fid', fid)
+            full_summary = tf.summary.merge([
+                tf.summary.image('x_true', image_grid(x_true)),
+                tf.summary.image('x_generated', image_grid(x_generated)),
+                tf.summary.image('gradients', image_grid(gradients)),
+                tf.summary.image('gradients_true', image_grid(tf.gradients(d_true, x_true)[0])),
+                tf.summary.image('gradients_generated', image_grid(tf.gradients(d_generated, x_generated)[0])),
+                inception_summary,
             ])
-
-            full_summary = tf.summary.merge([merged_summary, inception_summary, fid_summary])
 
         # Final eval
         with tf.name_scope('test'):
