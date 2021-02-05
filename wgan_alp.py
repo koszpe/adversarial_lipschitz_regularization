@@ -505,36 +505,6 @@ if __name__ == "__main__":
                 tf.summary.scalar('inception_score', inception_score)
             ])
 
-            # # FID VALIDATION
-            # def resize_and_classify(x):
-            #     INCEPTION_FINAL_POOL = 'pool_3:0'
-            #     x = tf.image.resize_bilinear(x, [299, 299])
-            #     return tf.contrib.gan.eval.run_inception(x, output_tensor=INCEPTION_FINAL_POOL)
-            #
-            # fid_real = x_10k
-            # fid_z = tf.constant(np.random.randn(10000, 128), dtype='float32')
-            # fid_z_list = array_ops.split(fid_z, num_or_size_splits=10000 // 100)
-            # fid_z_batches = array_ops.stack(fid_z_list)
-            # fid_gen = functional_ops.map_fn(
-            #     fn=partial(generator, reuse=True),
-            #     elems=fid_z_batches,
-            #     parallel_iterations=1,
-            #     back_prop=False,
-            #     swap_memory=True,
-            #     name='RunGenerator'
-            # )
-            # fid_gen = array_ops.concat(array_ops.unstack(fid_gen), 0)
-            # fid = tf.contrib.gan.eval.frechet_classifier_distance(
-            #     fid_real,
-            #     fid_gen,
-            #     classifier_fn=resize_and_classify,
-            #     num_batches=10000 // 100
-            # )
-            #
-            # fid_summary = tf.summary.merge([
-            #     tf.summary.scalar('fid', fid)
-            # ])
-
             full_summary = tf.summary.merge([
                 tf.summary.image('x_true', image_grid(x_true)),
                 tf.summary.image('x_generated', image_grid(x_generated)),
