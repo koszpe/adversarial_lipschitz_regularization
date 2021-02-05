@@ -304,11 +304,12 @@ if __name__ == "__main__":
     parser.add_argument("--PI_init_type",  type=str,   default="cube", choices=["cube", "sphere", "vertex"])
     parser.add_argument("--xi_eq_eps",     type=int,   default=0, choices=[0, 1])
     parser.add_argument("--ip",            type=int,   default=1)
-    parser.add_argument("--K",             type=float, default=1)
+    parser.add_argument("--K_min",         type=float, default=1)
+    parser.add_argument("--K_max",         type=float, default=1)
     parser.add_argument("--p",             type=float, default=2)
     parser.add_argument("--n_critic",      type=int,   default=5)
     parser.add_argument("--reduce_fn",                 default="mean", choices=["mean", "sum", "max"])
-    parser.add_argument("--reg",                       default="alp", choices=["gp", "lp", "alp"])
+    parser.add_argument("--reg",                       default="alp", choices=["gp", "lp", "alp", "no"])
     parser.add_argument( "--gpu_mask", type=int, default=0 )
     args = parser.parse_args()
     print(args)
@@ -321,7 +322,7 @@ if __name__ == "__main__":
 
     sess = tf.InteractiveSession()
 
-    run_name_parts = ["reg", "PI_init_type", "xi_eq_eps", "eps_min", "eps_max", "xi"]
+    run_name_parts = ["reg", "K_min", "K_max", "PI_init_type", "xi_eq_eps", "eps_min", "eps_max", "xi"]
     run_name = ""
     for key in run_name_parts:
         run_name += f"{key}:{getattr(args, key)}_"
@@ -366,6 +367,10 @@ if __name__ == "__main__":
         d_generated_train = discriminator(generator(z_gen, reuse=True), reuse=True)
 
     with tf.name_scope('regularizer'):
+        global_step = tf.Variable(0, trainable=False, name='global_step')
+
+        K = args.K_min + (args.K_max - args.K_min) * tf.clip_by_value(tf.cast(global_step, tf.float32) / 10000, 0, 1)
+
         epsilon = tf.random_uniform([tf.shape(x_true)[0], 1, 1, 1], 0.0, 1.0)
         x_hat = epsilon * x_generated + (1 - epsilon) * x_true
         d_hat = discriminator(x_hat, reuse=True)
@@ -375,10 +380,10 @@ if __name__ == "__main__":
         dual_p = 1 / (1 - 1 / args.p) if args.p != 1 else np.inf
         gradient_norms = stable_norm(gradients, ord=dual_p)
 
-        gp = gradient_norms - args.K
+        gp = gradient_norms - K
         gp_loss = args.lambda_lp * reduce_fn(gp ** 2)
 
-        lp = tf.maximum(gradient_norms - args.K, 0)
+        lp = tf.maximum(gradient_norms - K, 0)
         lp_loss = args.lambda_lp * reduce_fn(lp ** 2)
 
     with tf.name_scope('alp'):
@@ -420,7 +425,7 @@ if __name__ == "__main__":
         validity_hat  = discriminator(samples_hat, reuse=True)
         validity_diff = tf.abs(validity - validity_hat)
 
-        alp = tf.maximum(validity_diff / samples_diff - args.K, 0)
+        alp = tf.maximum(validity_diff / samples_diff - K, 0)
         # alp = tf.abs(validity_diff / samples_diff - args.K)
 
         nonzeros = tf.greater(alp, 0)
@@ -439,10 +444,11 @@ if __name__ == "__main__":
             d_loss += lp_loss
         elif args.reg == 'alp':
             d_loss += alp_loss
+        elif args.reg == 'no':
+            pass
 
     with tf.name_scope('optimizer'):
 
-        global_step = tf.Variable(0, trainable=False, name='global_step')
         decay = tf.maximum(0., 1. - (tf.cast(global_step, tf.float32) / args.iterations))
         learning_rate = args.lr * decay
         optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate, beta1=0., beta2=0.9)
