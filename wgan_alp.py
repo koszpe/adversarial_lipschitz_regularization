@@ -176,6 +176,18 @@ def normalize(x, ord):
     return x / tf.maximum(tf.expand_dims(tf.expand_dims(stable_norm(x, ord=ord), -1), -1), 1e-10)
 
 
+def cosine_similarity(v1, v2):
+    ''' Computes cosine similarity of a given vector with vector rows from matrix'''
+
+    norm = lambda  x: tf.norm(tf.contrib.layers.flatten(x), ord=2, axis=1, keepdims=False)
+
+    similarity = tf.reduce_sum(tf.multiply(v1, v2), axis=[1,2,3])
+
+    similarity = similarity / tf.multiply(norm(v1), norm(v2))
+
+    return similarity
+
+
 def downsample(x):
     with tf.name_scope('downsample'):
         x = tf.identity(x)
@@ -281,6 +293,29 @@ def discriminator(x, reuse):
             flat = tf.layers.dense(flat, 1)
             return flat
 
+def compute_alp(samples, r_adv):
+
+    samples_hat = tf.clip_by_value(samples + r_adv, clip_value_min=-1, clip_value_max=1)
+
+    d_lp = lambda x, x_hat: stable_norm(x - x_hat, ord=args.p)
+    d_x = d_lp
+
+    samples_diff = d_x(samples, samples_hat)
+    samples_diff = tf.maximum(samples_diff, 1e-10)
+
+    validity = discriminator(samples, reuse=True)
+    validity_hat = discriminator(samples_hat, reuse=True)
+    validity_diff = tf.abs(validity - validity_hat)
+
+    alp = tf.maximum(validity_diff / samples_diff - K, 0)
+
+    nonzeros = tf.greater(alp, 0)
+    count = tf.reduce_sum(tf.cast(nonzeros, tf.float32))
+
+    alp_loss = args.lambda_lp * reduce_fn(alp ** 2)
+
+    return alp, count, alp_loss
+
 
 if __name__ == "__main__":
 
@@ -309,7 +344,8 @@ if __name__ == "__main__":
     parser.add_argument("--p",             type=float, default=2)
     parser.add_argument("--n_critic",      type=int,   default=5)
     parser.add_argument("--reduce_fn",                 default="mean", choices=["mean", "sum", "max"])
-    parser.add_argument("--reg",                       default="alp", choices=["gp", "lp", "alp", "no"])
+    parser.add_argument("--reg",                       default="alp", choices=["gp", "lp", "alp", "no", "gp_alp"])
+    parser.add_argument("--gp_noise_std",  type=float, default=0.0)
     parser.add_argument( "--gpu_mask", type=int, default=0 )
     args = parser.parse_args()
     print(args)
@@ -322,7 +358,7 @@ if __name__ == "__main__":
 
     sess = tf.InteractiveSession()
 
-    run_name_parts = ["reg", "K_min", "K_max", "PI_init_type", "xi_eq_eps", "eps_min", "eps_max", "xi"]
+    run_name_parts = ["reg", "gp_noise_std", "K_min", "K_max", "PI_init_type", "xi_eq_eps", "eps_min", "eps_max", "xi"]
     run_name = ""
     for key in run_name_parts:
         run_name += f"{key}:{getattr(args, key)}_"
@@ -400,6 +436,7 @@ if __name__ == "__main__":
         elif args.PI_init_type == "vertex":
             d = tf.cast(tf.random_uniform(tf.shape(samples), minval=0, maxval=2, dtype="int64"), dtype="float32") - 0.5
         d = normalize(d, ord=2)
+
         if args.xi_eq_eps:
             xi = eps
         else:
@@ -413,25 +450,26 @@ if __name__ == "__main__":
             d = normalize(tf.stop_gradient(grad), ord=2)
         r_adv = d * eps
 
-        samples_hat = tf.clip_by_value(samples + r_adv, clip_value_min=-1, clip_value_max=1)
+        alp, count, alp_loss = compute_alp(samples, r_adv)
 
-        d_lp                   = lambda x, x_hat: stable_norm(x - x_hat, ord=args.p)
-        d_x                    = d_lp
+    with tf.name_scope('gp_alp'):
+        samples = tf.concat([x_true, x_generated], axis=0)
+        validity = discriminator(samples, reuse=True)
+        gp_alp_gradients = tf.gradients(validity, samples)[0]
+        eps = args.eps_min + (args.eps_max - args.eps_min) * tf.random_uniform([tf.shape(samples)[0], 1, 1, 1], 0, 1)
 
-        samples_diff = d_x(samples, samples_hat)
-        samples_diff = tf.maximum(samples_diff, 1e-10)
 
-        validity      = discriminator(samples    , reuse=True)
-        validity_hat  = discriminator(samples_hat, reuse=True)
-        validity_diff = tf.abs(validity - validity_hat)
+        dual_p = 1 / (1 - 1 / args.p) if args.p != 1 else np.inf
+        gp_alp_gradient_norms = normalize(gp_alp_gradients, ord=dual_p)
+        if args.gp_noise_std > 0.0:
+            noise = tf.random_uniform(tf.shape(gp_alp_gradients), 1.0, args.gp_noise_std)
+            gp_alp_r_adv = gp_alp_gradient_norms * noise
+            gp_alp_r_adv = normalize(gp_alp_r_adv, ord=dual_p)
+        else:
+            gp_alp_r_adv = gp_alp_gradient_norms
+        gp_alp_r_adv = gp_alp_r_adv * eps
 
-        alp = tf.maximum(validity_diff / samples_diff - K, 0)
-        # alp = tf.abs(validity_diff / samples_diff - args.K)
-
-        nonzeros = tf.greater(alp, 0)
-        count = tf.reduce_sum(tf.cast(nonzeros, tf.float32))
-
-        alp_loss = args.lambda_lp * reduce_fn(alp ** 2)
+        gp_alp, gp_alp_count, gp_alp_loss = compute_alp(samples, gp_alp_r_adv)
 
     with tf.name_scope('loss_gan'):
         wasserstein = (tf.reduce_mean(d_generated) - tf.reduce_mean(d_true))
@@ -446,6 +484,8 @@ if __name__ == "__main__":
             d_loss += alp_loss
         elif args.reg == 'no':
             pass
+        elif args.reg == 'gp_alp':
+            d_loss += gp_alp_loss
 
     with tf.name_scope('optimizer'):
 
@@ -486,6 +526,14 @@ if __name__ == "__main__":
         tf.summary.scalar('alp_loss', alp_loss)
         tf.summary.scalar('count', count)
         scalars_summary('alp', alp)
+
+        tf.summary.scalar('gp_alp_loss', gp_alp_loss)
+        tf.summary.scalar('gp_alp_count', gp_alp_count)
+        scalars_summary('gp_alp', gp_alp)
+
+        tf.summary.scalar('cos_sim:alp_r-gp_alp_r', tf.reduce_mean(tf.abs(cosine_similarity(r_adv, gp_alp_r_adv))))
+        tf.summary.scalar('cos_sim:alp_r-grad', tf.reduce_mean(tf.abs(cosine_similarity(r_adv, gp_alp_gradient_norms))))
+        tf.summary.scalar('cos_sim:gp_alp_r-r_grad', tf.reduce_mean(tf.abs(cosine_similarity(gp_alp_r_adv, gp_alp_gradient_norms))))
 
         merged_summary = tf.summary.merge_all()
 
