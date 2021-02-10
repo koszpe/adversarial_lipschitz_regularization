@@ -344,7 +344,7 @@ if __name__ == "__main__":
     parser.add_argument("--p",             type=float, default=2)
     parser.add_argument("--n_critic",      type=int,   default=5)
     parser.add_argument("--reduce_fn",                 default="mean", choices=["mean", "sum", "max"])
-    parser.add_argument("--reg",                       default="alp", choices=["gp", "lp", "alp", "no", "gp_alp", "gp_and_alp", "dir_grad_loss"])
+    parser.add_argument("--reg",                       default="alp", choices=["gp", "lp", "alp", "no", "gp_alp", "gp_and_alp"])
     parser.add_argument("--gp_noise_std",  type=float, default=0.0)  # it is valid around 0.01
     parser.add_argument( "--gpu_mask", type=int, default=0 )
     args = parser.parse_args()
@@ -419,18 +419,12 @@ if __name__ == "__main__":
         gp = gradient_norms - K
         gp_loss = args.lambda_lp * reduce_fn(gp ** 2)
 
-        direction = tf.abs(tf.random_uniform(tf.shape(gradients), 0, 1) - 0.5)
-        direction = normalize(direction, ord=2)
 
-        directional_grad = tf.reduce_sum(tf.multiply(gradients, direction), axis=[1,2,3])
-        dir_grad_loss = tf.abs(gradient_norms - K - directional_grad)
-        dir_grad_loss = args.lambda_lp * tf.reduce_mean(dir_grad_loss)
+        direction = tf.random_uniform(tf.shape(gradients), 0, 1) - 0.5
+        direction = normalize(direction, ord=2)
 
         lp = tf.maximum(gradient_norms - K, 0)
         lp_loss = args.lambda_lp * reduce_fn(lp ** 2)
-
-        lp_mean = tf.reduce_mean(lp)
-        lp_mean_loss = args.lambda_lp * lp_mean ** 2
 
     with tf.name_scope('alp'):
         samples = tf.concat([x_true, x_generated], axis=0)
@@ -498,9 +492,6 @@ if __name__ == "__main__":
             d_loss += gp_alp_loss
         elif args.reg == 'gp_and_alp':
             d_loss += alp_loss + gp_loss
-        elif args.reg == 'dir_grad_loss':
-            d_loss += dir_grad_loss
-
 
     with tf.name_scope('optimizer'):
 
@@ -537,9 +528,6 @@ if __name__ == "__main__":
 
         scalars_summary('gradient_norms', gradient_norms)
         scalars_summary('gradients', gradients)
-
-        scalars_summary('directional_grad', directional_grad)
-        scalars_summary('dir_grad_loss', dir_grad_loss)
 
         tf.summary.scalar('alp_loss', alp_loss)
         tf.summary.scalar('count', count)
