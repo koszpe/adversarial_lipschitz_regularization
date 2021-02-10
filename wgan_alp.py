@@ -345,7 +345,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_critic",      type=int,   default=5)
     parser.add_argument("--reduce_fn",                 default="mean", choices=["mean", "sum", "max"])
     parser.add_argument("--reg",                       default="alp", choices=["gp", "lp", "alp", "no", "gp_alp"])
-    parser.add_argument("--gp_noise_std",  type=float, default=0.0)
+    parser.add_argument("--gp_noise_std",  type=float, default=0.0)  # it is valid around 0.01
     parser.add_argument( "--gpu_mask", type=int, default=0 )
     args = parser.parse_args()
     print(args)
@@ -358,7 +358,7 @@ if __name__ == "__main__":
 
     sess = tf.InteractiveSession()
 
-    run_name_parts = ["reg", "gp_noise_std", "K_min", "K_max", "PI_init_type", "xi_eq_eps", "eps_min", "eps_max", "xi"]
+    run_name_parts = ["reg", "gp_noise_std", "K_min", "K_max", "PI_init_type", "xi_eq_eps", "eps_min", "eps_max", "xi", "ip"]
     run_name = ""
     for key in run_name_parts:
         run_name += f"{key}:{getattr(args, key)}_"
@@ -462,8 +462,8 @@ if __name__ == "__main__":
         dual_p = 1 / (1 - 1 / args.p) if args.p != 1 else np.inf
         gp_alp_gradient_norms = normalize(gp_alp_gradients, ord=dual_p)
         if args.gp_noise_std > 0.0:
-            noise = tf.random_uniform(tf.shape(gp_alp_gradients), 1.0, args.gp_noise_std)
-            gp_alp_r_adv = gp_alp_gradient_norms * noise
+            noise = tf.random_normal(tf.shape(gp_alp_gradients), 0.0, args.gp_noise_std)
+            gp_alp_r_adv = gp_alp_gradient_norms + noise
             gp_alp_r_adv = normalize(gp_alp_r_adv, ord=dual_p)
         else:
             gp_alp_r_adv = gp_alp_gradient_norms
