@@ -293,7 +293,7 @@ def discriminator(x, reuse):
             flat = tf.layers.dense(flat, 1)
             return flat
 
-def compute_alp(samples, r_adv):
+def compute_alp(samples, r_adv, K):
 
     samples_hat = tf.clip_by_value(samples + r_adv, clip_value_min=-1, clip_value_max=1)
 
@@ -344,7 +344,7 @@ if __name__ == "__main__":
     parser.add_argument("--p",             type=float, default=2)
     parser.add_argument("--n_critic",      type=int,   default=5)
     parser.add_argument("--reduce_fn",                 default="mean", choices=["mean", "sum", "max"])
-    parser.add_argument("--reg",                       default="alp", choices=["gp", "lp", "alp", "no", "gp_alp"])
+    parser.add_argument("--reg",                       default="alp", choices=["gp", "lp", "alp", "no", "gp_alp", "gp_and_alp", "dir_grad_loss"])
     parser.add_argument("--gp_noise_std",  type=float, default=0.0)  # it is valid around 0.01
     parser.add_argument( "--gpu_mask", type=int, default=0 )
     args = parser.parse_args()
@@ -419,8 +419,18 @@ if __name__ == "__main__":
         gp = gradient_norms - K
         gp_loss = args.lambda_lp * reduce_fn(gp ** 2)
 
+        direction = tf.abs(tf.random_uniform(tf.shape(gradients), 0, 1) - 0.5)
+        direction = normalize(direction, ord=2)
+
+        directional_grad = tf.reduce_sum(tf.multiply(gradients, direction), axis=[1,2,3])
+        dir_grad_loss = tf.abs(gradient_norms - K - directional_grad)
+        dir_grad_loss = args.lambda_lp * tf.reduce_mean(dir_grad_loss)
+
         lp = tf.maximum(gradient_norms - K, 0)
         lp_loss = args.lambda_lp * reduce_fn(lp ** 2)
+
+        lp_mean = tf.reduce_mean(lp)
+        lp_mean_loss = args.lambda_lp * lp_mean ** 2
 
     with tf.name_scope('alp'):
         samples = tf.concat([x_true, x_generated], axis=0)
@@ -450,7 +460,7 @@ if __name__ == "__main__":
             d = normalize(tf.stop_gradient(grad), ord=2)
         r_adv = d * eps
 
-        alp, count, alp_loss = compute_alp(samples, r_adv)
+        alp, count, alp_loss = compute_alp(samples, r_adv, K=1)
 
     with tf.name_scope('gp_alp'):
         samples = tf.concat([x_true, x_generated], axis=0)
@@ -469,7 +479,7 @@ if __name__ == "__main__":
             gp_alp_r_adv = gp_alp_gradient_norms
         gp_alp_r_adv = gp_alp_r_adv * eps
 
-        gp_alp, gp_alp_count, gp_alp_loss = compute_alp(samples, gp_alp_r_adv)
+        gp_alp, gp_alp_count, gp_alp_loss = compute_alp(samples, gp_alp_r_adv, K=1)
 
     with tf.name_scope('loss_gan'):
         wasserstein = (tf.reduce_mean(d_generated) - tf.reduce_mean(d_true))
@@ -486,6 +496,11 @@ if __name__ == "__main__":
             pass
         elif args.reg == 'gp_alp':
             d_loss += gp_alp_loss
+        elif args.reg == 'gp_and_alp':
+            d_loss += alp_loss + gp_loss
+        elif args.reg == 'dir_grad_loss':
+            d_loss += dir_grad_loss
+
 
     with tf.name_scope('optimizer'):
 
@@ -522,6 +537,9 @@ if __name__ == "__main__":
 
         scalars_summary('gradient_norms', gradient_norms)
         scalars_summary('gradients', gradients)
+
+        scalars_summary('directional_grad', directional_grad)
+        scalars_summary('dir_grad_loss', dir_grad_loss)
 
         tf.summary.scalar('alp_loss', alp_loss)
         tf.summary.scalar('count', count)
