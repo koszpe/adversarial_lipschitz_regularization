@@ -294,7 +294,7 @@ def discriminator(x, reuse):
             return flat
 
 def compute_alp(samples, r_adv, K):
-
+    r_adv = tf.stop_gradient(r_adv)
     samples_hat = tf.clip_by_value(samples + r_adv, clip_value_min=-1, clip_value_max=1)
 
     d_lp = lambda x, x_hat: stable_norm(x - x_hat, ord=args.p)
@@ -317,6 +317,14 @@ def compute_alp(samples, r_adv, K):
     return alp, count, alp_loss
 
 
+def shuffle_noise(value):
+    sh = list(value.shape)
+    flattened = tf.contrib.layers.flatten(value)
+    shuffeled = tf.random_shuffle(tf.transpose(flattened, perm=[1, 0]))
+    shuffeled = tf.reshape(tf.transpose(shuffeled, perm=[1, 0]), [-1, *sh[1:]])
+    return shuffeled
+
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
@@ -336,6 +344,7 @@ if __name__ == "__main__":
     parser.add_argument("--eps_min",       type=float, default=0.1)
     parser.add_argument("--eps_max",       type=float, default=10.0)
     parser.add_argument("--xi",            type=float, default=10.0)
+    parser.add_argument("--numstab",       type=int,   default=1, choices=[0, 1])
     parser.add_argument("--PI_init_type",  type=str,   default="cube", choices=["cube", "sphere", "vertex"])
     parser.add_argument("--xi_eq_eps",     type=int,   default=0, choices=[0, 1])
     parser.add_argument("--ip",            type=int,   default=1)
@@ -344,7 +353,9 @@ if __name__ == "__main__":
     parser.add_argument("--p",             type=float, default=2)
     parser.add_argument("--n_critic",      type=int,   default=5)
     parser.add_argument("--reduce_fn",                 default="mean", choices=["mean", "sum", "max"])
-    parser.add_argument("--reg",                       default="alp", choices=["gp", "lp", "alp", "no", "gp_alp", "gp_and_alp"])
+    parser.add_argument("--reg",                       default="alp", choices=["gp", "lp", "alp", "no", "gp_alp",
+                                                                               "gp_and_alp", "lp_and_alp",
+                                                                               "inter_alp", "r1"])
     parser.add_argument("--gp_noise_std",  type=float, default=0.0)  # it is valid around 0.01
     parser.add_argument( "--gpu_mask", type=int, default=0 )
     args = parser.parse_args()
@@ -358,7 +369,7 @@ if __name__ == "__main__":
 
     sess = tf.InteractiveSession()
 
-    run_name_parts = ["reg", "gp_noise_std", "K_min", "K_max", "PI_init_type", "xi_eq_eps", "eps_min", "eps_max", "xi", "ip"]
+    run_name_parts = ["numstab", "reg", "lambda_lp", "gp_noise_std", "K_min", "K_max", "PI_init_type", "xi_eq_eps", "eps_min", "eps_max", "xi", "ip"]
     run_name = ""
     for key in run_name_parts:
         run_name += f"{key}:{getattr(args, key)}_"
@@ -419,6 +430,8 @@ if __name__ == "__main__":
         gp = gradient_norms - K
         gp_loss = args.lambda_lp * reduce_fn(gp ** 2)
 
+        r1 = gradient_norms
+        r1_loss = args.lambda_lp * reduce_fn(r1 ** 2)
 
         direction = tf.random_uniform(tf.shape(gradients), 0, 1) - 0.5
         direction = normalize(direction, ord=2)
@@ -449,7 +462,10 @@ if __name__ == "__main__":
             perturbation = xi * d
             samples_hat = tf.clip_by_value(samples + perturbation, clip_value_min=-1, clip_value_max=1)
             validity_hat = discriminator(samples_hat, reuse=True)
-            dist = tf.reduce_mean(tf.abs(validity - validity_hat))
+            if args.numstab:
+                dist = tf.reduce_sum(tf.abs(validity - validity_hat)) / xi # Just for numerical stability
+            else:
+                dist = tf.reduce_mean(tf.abs(validity - validity_hat))  # Just for numerical stability
             grad = tf.gradients(dist, [d], aggregation_method=2)[0]
             d = normalize(tf.stop_gradient(grad), ord=2)
         r_adv = d * eps
@@ -465,15 +481,65 @@ if __name__ == "__main__":
 
         dual_p = 1 / (1 - 1 / args.p) if args.p != 1 else np.inf
         gp_alp_gradient_norms = normalize(gp_alp_gradients, ord=dual_p)
+
+        alp_r_adv_grad_diff = d - gp_alp_gradient_norms
         if args.gp_noise_std > 0.0:
             noise = tf.random_normal(tf.shape(gp_alp_gradients), 0.0, args.gp_noise_std)
             gp_alp_r_adv = gp_alp_gradient_norms + noise
+            gp_alp_r_adv = normalize(gp_alp_r_adv, ord=dual_p)
+        elif args.gp_noise_std == -1:
+            gp_alp_r_adv = gp_alp_gradient_norms + shuffle_noise(alp_r_adv_grad_diff)
+            gp_alp_r_adv = normalize(gp_alp_r_adv, ord=dual_p)
+        elif args.gp_noise_std == -2:
+            gp_alp_r_adv = gp_alp_gradient_norms + alp_r_adv_grad_diff
             gp_alp_r_adv = normalize(gp_alp_r_adv, ord=dual_p)
         else:
             gp_alp_r_adv = gp_alp_gradient_norms
         gp_alp_r_adv = gp_alp_r_adv * eps
 
         gp_alp, gp_alp_count, gp_alp_loss = compute_alp(samples, gp_alp_r_adv, K=1)
+
+    with tf.name_scope('inter_alp_loss'):
+        inalp_samples = epsilon * x_generated + (1 - epsilon) * x_true
+        inalp_validity = discriminator(inalp_samples, reuse=True)
+
+        inalp_eps = args.eps_min + (args.eps_max - args.eps_min) * tf.random_uniform([tf.shape(inalp_samples)[0], 1, 1, 1], 0, 1)
+
+        if args.PI_init_type == "cube":
+            inalp_d= tf.random_uniform(tf.shape(inalp_samples), 0, 1) - 0.5
+        elif args.PI_init_type == "sphere":
+            inalp_d= tf.random_normal(tf.shape(inalp_samples), 0, 1)
+        elif args.PI_init_type == "vertex":
+            inalp_d= tf.cast(tf.random_uniform(tf.shape(inalp_samples), minval=0, maxval=2, dtype="int64"), dtype="float32") - 0.5
+        inalp_d= normalize(inalp_d, ord=2)
+
+        if args.xi_eq_eps:
+            inalp_xi = inalp_eps
+        else:
+            inalp_xi = args.xi
+        for _ in range(args.ip):
+            inalp_perturbation = inalp_xi * inalp_d
+            inalp_samples_hat = tf.clip_by_value(inalp_samples + inalp_perturbation, clip_value_min=-1, clip_value_max=1)
+            inalp_validity_hat = discriminator(inalp_samples_hat, reuse=True)
+            if args.numstab:
+                inalp_dist = tf.reduce_sum(tf.abs(inalp_validity - inalp_validity_hat)) / xi # Just for numerical stability
+            else:
+                inalp_dist = tf.reduce_mean(tf.abs(inalp_validity - inalp_validity_hat))  # Just for numerical stability
+            inalp_grad= tf.gradients(inalp_dist, [inalp_d], aggregation_method=2)[0]
+            inalp_d= normalize(tf.stop_gradient(inalp_grad), ord=2)
+        inalp_r_adv = inalp_d * inalp_eps
+
+        inter_alp, inter_alp_count, inter_alp_loss = compute_alp(inalp_samples, inalp_r_adv, K=1)
+
+
+#    with tf.name_scope('adv_gp'):
+#        adv_gradients = tf.gradients(d_hat, x_hat)[0]
+#
+#        dual_p = 1 / (1 - 1 / args.p) if args.p != 1 else np.inf
+#        gradient_norms = stable_norm(gradients, ord=dual_p)
+
+#        gp = gradient_norms - K
+#        gp_loss = args.lambda_lp * reduce_fn(gp ** 2)
 
     with tf.name_scope('loss_gan'):
         wasserstein = (tf.reduce_mean(d_generated) - tf.reduce_mean(d_true))
@@ -492,6 +558,13 @@ if __name__ == "__main__":
             d_loss += gp_alp_loss
         elif args.reg == 'gp_and_alp':
             d_loss += alp_loss + gp_loss
+        elif args.reg == 'lp_and_alp':
+            d_loss += alp_loss + lp_loss
+        elif args.reg == 'r1':
+            d_loss += r1_loss
+        elif args.reg == 'inter_alp':
+             d_loss += inter_alp_loss
+
 
     with tf.name_scope('optimizer'):
 
@@ -529,6 +602,9 @@ if __name__ == "__main__":
         scalars_summary('gradient_norms', gradient_norms)
         scalars_summary('gradients', gradients)
 
+        scalars_summary('gp_alp_gradient_norms', stable_norm(gp_alp_gradients, ord=dual_p))
+        scalars_summary('gp_alp_gradients', gp_alp_gradients)
+
         tf.summary.scalar('alp_loss', alp_loss)
         tf.summary.scalar('count', count)
         scalars_summary('alp', alp)
@@ -536,6 +612,12 @@ if __name__ == "__main__":
         tf.summary.scalar('gp_alp_loss', gp_alp_loss)
         tf.summary.scalar('gp_alp_count', gp_alp_count)
         scalars_summary('gp_alp', gp_alp)
+
+        tf.summary.scalar('inter_alp_loss', inter_alp_loss)
+        tf.summary.scalar('inter_alp_count', inter_alp_count)
+        scalars_summary('inter_alp', inter_alp)
+
+        tf.summary.scalar('r_adv_norm', tf.reduce_mean(stable_norm(d, 2)))
 
         tf.summary.scalar('cos_sim:alp_r-gp_alp_r', tf.reduce_mean(tf.abs(cosine_similarity(r_adv, gp_alp_r_adv))))
         tf.summary.scalar('cos_sim:alp_r-grad', tf.reduce_mean(tf.abs(cosine_similarity(r_adv, gp_alp_gradient_norms))))
